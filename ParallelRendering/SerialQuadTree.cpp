@@ -182,14 +182,26 @@ bool checkCollision(const GameObject& go1, const GameObject& go2) {
     return go1.bounds.intersects(go2.bounds);
 }
 
+sf::Text makeText(sf::Font& font, int char_size, sf::Color color) {
+    sf::Text text(font);
+    text.setCharacterSize(char_size);
+    text.setFillColor(color);
+    text.setPosition({ 10.f, 10.f });
+	text.setStyle(sf::Text::Bold);
+    return text;
+}
+
 int main() {
     const int WIN_WIDTH = 1800;
     const int WIN_HEIGHT = 1200;
-    const int NUM_OBJECTS = 1000;
+    const int NUM_OBJECTS = 10000;
     const int NODE_CAPACITY = 4;
 
     sf::RenderWindow window(sf::VideoMode({ WIN_WIDTH, WIN_HEIGHT }), "QuadTree");
     window.setFramerateLimit(60);
+
+    sf::Font font("ARIAL.TTF");
+	sf::Text fpsText = makeText(font, 20, sf::Color::Green);
 
     std::vector<GameObject> allObjects;
     allObjects.reserve(NUM_OBJECTS);
@@ -212,9 +224,23 @@ int main() {
     QuadTree tree({ 0, 0, (float)WIN_WIDTH, (float)WIN_HEIGHT }, NODE_CAPACITY);
 
     sf::Clock clock;
+    sf::Clock fpsClock;
+    int frameCount = 0;
+    float fps = 0.f;
 
     while (window.isOpen()) {
         float deltaTime = clock.restart().asSeconds();
+        frameCount++;
+
+        if (fpsClock.getElapsedTime().asSeconds() >= 1.f) {
+            fps = frameCount / fpsClock.getElapsedTime().asSeconds();
+            frameCount = 0;
+            fpsClock.restart();
+
+            std::ostringstream ss;
+            ss << "FPS: " << std::fixed << std::setprecision(1) << fps;
+            fpsText.setString(ss.str());
+        }
 
         window.handleEvents(
             [&window](const sf::Event::Closed&) { window.close(); }
@@ -253,6 +279,7 @@ int main() {
         for (const GameObject& obj : allObjects) {
             window.draw(obj.shape);
         }
+		window.draw(fpsText);
         window.display();
     }
     return 0;
