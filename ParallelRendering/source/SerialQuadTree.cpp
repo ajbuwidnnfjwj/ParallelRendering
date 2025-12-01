@@ -4,32 +4,34 @@
 #include <random>
 #include <chrono>
 #include <algorithm>
+#include <thread>
+#include <atomic>
+#include <sstream>
+#include <iomanip>
+
 #include "SFML/Graphics.hpp"
 
-// 2D ¡¬«•
 struct Point {
     float x, y;
 };
 
-// AABB
 struct Bounds {
     float x, y;
     float width, height;
- 
+
     bool contains(Point p) const {
         return (p.x >= x && p.x <= x + width &&
-            p.y >= y && p.y <= y + height);
+                p.y >= y && p.y <= y + height);
     }
 
     bool intersects(const Bounds& other) const {
         return !(other.x > x + width ||
-            other.x + other.width < x ||
-            other.y > y + height ||
-            other.y + other.height < y);
+                 other.x + other.width < x ||
+                 other.y > y + height ||
+                 other.y + other.height < y);
     }
 };
 
-// ƒıµÂ∆Æ∏Æ∞° ∞¸∏Æ«“ ∞¥√º
 struct GameObject {
     int id;
     Bounds bounds;
@@ -41,11 +43,8 @@ struct GameObject {
 
         float radius = bounds.width / 2.0f;
         shape.setRadius(radius);
-
         shape.setOrigin({ radius, radius });
-
         shape.setPosition({ bounds.x + radius, bounds.y + radius });
-
         shape.setFillColor(sf::Color::White);
     }
 
@@ -53,7 +52,6 @@ struct GameObject {
         bounds.x += velocity.x * dt;
         bounds.y += velocity.y * dt;
 
-        // ∫Æ π›ªÁ
         if (bounds.x < 0 || bounds.x + bounds.width > mapWidth) {
             velocity.x *= -1;
             bounds.x = std::max(0.0f, std::min(bounds.x, mapWidth - bounds.width));
@@ -128,8 +126,7 @@ private:
                         found.push_back(obj);
                     }
                 }
-            }
-            else {
+            } else {
                 for (int i = 0; i < 4; ++i) {
                     children[i]->query(range, found);
                 }
@@ -161,22 +158,24 @@ public:
         : capacity(cap) {
         root = std::make_unique<Node>(boundary, cap, 0);
     }
+
     void insert(GameObject* obj) { root->insert(obj); }
+
     std::vector<GameObject*> query(const Bounds& range) const {
         std::vector<GameObject*> found;
         root->query(range, found);
         return found;
     }
+
     void clear() {
         Bounds rootBounds = root->bounds;
         root = std::make_unique<Node>(rootBounds, capacity, 0);
     }
+
     void draw(sf::RenderWindow& window) {
         if (root) { root->draw(window); }
     }
 };
-
-// ∏ﬁ¿Œ «¡∑Œ±◊∑•
 
 bool checkCollision(const GameObject& go1, const GameObject& go2) {
     return go1.bounds.intersects(go2.bounds);
@@ -187,7 +186,7 @@ sf::Text makeText(sf::Font& font, int char_size, sf::Color color) {
     text.setCharacterSize(char_size);
     text.setFillColor(color);
     text.setPosition({ 10.f, 10.f });
-	text.setStyle(sf::Text::Bold);
+    text.setStyle(sf::Text::Bold);
     return text;
 }
 
@@ -201,14 +200,16 @@ int main() {
     window.setFramerateLimit(60);
 
     sf::Font font("ARIAL.TTF");
-	sf::Text fpsText = makeText(font, 20, sf::Color::Green);
+    sf::Text fpsText = makeText(font, 20, sf::Color::Green);
 
     std::vector<GameObject> allObjects;
     allObjects.reserve(NUM_OBJECTS);
 
+    std::vector<std::atomic_bool> collided(NUM_OBJECTS);
+
     std::mt19937 rng(static_cast<unsigned int>(
         std::chrono::system_clock::now().time_since_epoch().count()
-        ));
+    ));
     std::uniform_real_distribution<float> rand_pos_x(0.0f, (float)WIN_WIDTH);
     std::uniform_real_distribution<float> rand_pos_y(0.0f, (float)WIN_HEIGHT);
     std::uniform_real_distribution<float> rand_vel(-50.0f, 50.0f);
@@ -228,6 +229,32 @@ int main() {
     int frameCount = 0;
     float fps = 0.f;
 
+    std::vector<std::thread> thread_collide_tests;
+    unsigned int n_thread_collide_test = std::max(1u, std::thread::hardware_concurrency() / 2);
+    thread_collide_tests.reserve(n_thread_collide_test);
+
+    std::vector<std::thread> thread_renderer;
+    unsigned int n_thread_renderer = std::max(1u, std::thread::hardware_concurrency() / 2);
+    thread_renderer.reserve(n_thread_renderer);
+
+    auto worker_collide_test = [&](std::atomic<size_t>& nextIndex) {
+        while (true) {
+            size_t i = nextIndex.fetch_add(1, std::memory_order_relaxed);
+            if (i >= allObjects.size()) break;
+
+            GameObject& objA = allObjects[i];
+            auto candidates = tree.query(objA.bounds);
+
+            for (GameObject* objB : candidates) {
+                if (objA.id >= objB->id) continue;
+                if (checkCollision(objA, *objB)) {
+                    collided[objA.id].store(true, std::memory_order_relaxed);
+                    collided[objB->id].store(true, std::memory_order_relaxed);
+                }
+            }
+        }
+    };
+
     while (window.isOpen()) {
         float deltaTime = clock.restart().asSeconds();
         frameCount++;
@@ -246,31 +273,40 @@ int main() {
             [&window](const sf::Event::Closed&) { window.close(); }
         );
 
+        // Ï∂©Îèå ÌîåÎûòÍ∑∏ Ï¥àÍ∏∞Ìôî
+        for (auto& c : collided) {
+            c.store(false, std::memory_order_relaxed);
+        }
+
+        // ÏóÖÎç∞Ïù¥Ìä∏
         for (GameObject& obj : allObjects) {
             obj.update(deltaTime, (float)WIN_WIDTH, (float)WIN_HEIGHT);
             obj.shape.setFillColor(sf::Color::White);
             obj.shape.setOutlineThickness(0);
         }
 
+        // ÏøºÎìúÌä∏Î¶¨ ÎπåÎìú
         tree.clear();
         for (GameObject& obj : allObjects) {
             tree.insert(&obj);
         }
 
-        for (size_t i = 0; i < allObjects.size(); ++i) {
-            GameObject& objA = allObjects[i];
-            std::vector<GameObject*> candidates = tree.query(objA.bounds);
+        // Î≥ëÎ†¨ Ï∂©Îèå Í≤ÄÏÇ¨
+        std::atomic<size_t> nextIndex{0};
 
-            for (GameObject* objB : candidates) {
-                if (objA.id >= objB->id) continue;
-                if (checkCollision(objA, *objB)) {
-                    objA.shape.setFillColor(sf::Color::Red);
-                    objB->shape.setFillColor(sf::Color::Red);
-                    objA.shape.setOutlineThickness(1.5f);
-                    objA.shape.setOutlineColor(sf::Color::Yellow);
-                    objB->shape.setOutlineThickness(1.5f);
-                    objB->shape.setOutlineColor(sf::Color::Yellow);
-                }
+        for (unsigned int t = 0; t < n_thread_collide_test; ++t) {
+            thread_collide_tests.emplace_back(worker_collide_test, std::ref(nextIndex));
+        }
+        for (auto& th : thread_collide_tests) {
+            th.join();
+        }
+
+
+        for (int i = 0; i < NUM_OBJECTS; ++i) {
+            if (collided[i].load(std::memory_order_relaxed)) {
+                allObjects[i].shape.setFillColor(sf::Color::Red);
+                allObjects[i].shape.setOutlineThickness(1.5f);
+                allObjects[i].shape.setOutlineColor(sf::Color::Yellow);
             }
         }
 
@@ -279,8 +315,11 @@ int main() {
         for (const GameObject& obj : allObjects) {
             window.draw(obj.shape);
         }
-		window.draw(fpsText);
+        window.draw(fpsText);
         window.display();
+
+        thread_collide_tests.clear();
     }
+
     return 0;
 }
