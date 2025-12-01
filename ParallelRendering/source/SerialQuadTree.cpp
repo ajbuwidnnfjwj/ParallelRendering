@@ -273,25 +273,25 @@ int main() {
             [&window](const sf::Event::Closed&) { window.close(); }
         );
 
-        // ì¶©ëŒ í”Œë˜ê·¸ ì´ˆê¸°í™”
+        // Ãæµ¹ ÇÃ·¡±× ÃÊ±âÈ­
         for (auto& c : collided) {
             c.store(false, std::memory_order_relaxed);
         }
 
-        // ì—…ë°ì´íŠ¸
+        // ¾÷µ¥ÀÌÆ®
         for (GameObject& obj : allObjects) {
             obj.update(deltaTime, (float)WIN_WIDTH, (float)WIN_HEIGHT);
             obj.shape.setFillColor(sf::Color::White);
             obj.shape.setOutlineThickness(0);
         }
 
-        // ì¿¼ë“œíŠ¸ë¦¬ ë¹Œë“œ
+        // ÄõµåÆ®¸® ºôµå
         tree.clear();
         for (GameObject& obj : allObjects) {
             tree.insert(&obj);
         }
 
-        // ë³‘ë ¬ ì¶©ëŒ ê²€ì‚¬
+        // º´·Ä Ãæµ¹ °Ë»ç
         std::atomic<size_t> nextIndex{0};
 
         for (unsigned int t = 0; t < n_thread_collide_test; ++t) {
