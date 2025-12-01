@@ -8,6 +8,7 @@
 #include <atomic>
 #include <sstream>
 #include <iomanip>
+#include <fstream>
 
 #include "SFML/Graphics.hpp"
 
@@ -193,133 +194,149 @@ sf::Text makeText(sf::Font& font, int char_size, sf::Color color) {
 int main() {
     const int WIN_WIDTH = 1800;
     const int WIN_HEIGHT = 1200;
-    const int NUM_OBJECTS = 10000;
     const int NODE_CAPACITY = 4;
 
-    sf::RenderWindow window(sf::VideoMode({ WIN_WIDTH, WIN_HEIGHT }), "QuadTree");
-    window.setFramerateLimit(60);
+    for (int NUM_OBJECTS = 1000; NUM_OBJECTS <= 10000; NUM_OBJECTS+=1000) {
+        std::fstream file;
+        file.open("obj"+std::to_string(NUM_OBJECTS)+".txt", std::ios::out | std::ios::app);
 
-    sf::Font font("ARIAL.TTF");
-    sf::Text fpsText = makeText(font, 20, sf::Color::Green);
+        unsigned int MAX_THREAD = std::thread::hardware_concurrency();
+        std::cout << "available threads: " << MAX_THREAD << std::endl;
+        std::cout << "========================================================================"<< std::endl;
+        for (int n_thread = 1; n_thread <= MAX_THREAD; ++n_thread) {
+            sf::RenderWindow window(sf::VideoMode({ WIN_WIDTH, WIN_HEIGHT }), "QuadTree");
+            //window.setFramerateLimit(60);
 
-    std::vector<GameObject> allObjects;
-    allObjects.reserve(NUM_OBJECTS);
+            sf::Font font("ARIAL.TTF");
+            sf::Text fpsText = makeText(font, 20, sf::Color::Green);
 
-    std::vector<std::atomic_bool> collided(NUM_OBJECTS);
+            std::vector<GameObject> allObjects;
+            allObjects.reserve(NUM_OBJECTS);
 
-    std::mt19937 rng(static_cast<unsigned int>(
-        std::chrono::system_clock::now().time_since_epoch().count()
-    ));
-    std::uniform_real_distribution<float> rand_pos_x(0.0f, (float)WIN_WIDTH);
-    std::uniform_real_distribution<float> rand_pos_y(0.0f, (float)WIN_HEIGHT);
-    std::uniform_real_distribution<float> rand_vel(-50.0f, 50.0f);
-    std::uniform_real_distribution<float> rand_radius(5.0f, 10.0f);
+            std::vector<std::atomic_bool> collided(NUM_OBJECTS);
 
-    for (int i = 0; i < NUM_OBJECTS; ++i) {
-        float radius = rand_radius(rng);
-        Bounds b = { rand_pos_x(rng), rand_pos_y(rng), radius * 2, radius * 2 };
-        Point vel = { rand_vel(rng), rand_vel(rng) };
-        allObjects.emplace_back(i, b, vel);
-    }
+            std::mt19937 rng(static_cast<unsigned int>(
+                std::chrono::system_clock::now().time_since_epoch().count()
+            ));
+            std::uniform_real_distribution<float> rand_pos_x(0.0f, (float)WIN_WIDTH);
+            std::uniform_real_distribution<float> rand_pos_y(0.0f, (float)WIN_HEIGHT);
+            std::uniform_real_distribution<float> rand_vel(-50.0f, 50.0f);
+            std::uniform_real_distribution<float> rand_radius(5.0f, 10.0f);
 
-    QuadTree tree({ 0, 0, (float)WIN_WIDTH, (float)WIN_HEIGHT }, NODE_CAPACITY);
+            for (int i = 0; i < NUM_OBJECTS; ++i) {
+                float radius = rand_radius(rng);
+                Bounds b = { rand_pos_x(rng), rand_pos_y(rng), radius * 2, radius * 2 };
+                Point vel = { rand_vel(rng), rand_vel(rng) };
+                allObjects.emplace_back(i, b, vel);
+            }
 
-    sf::Clock clock;
-    sf::Clock fpsClock;
-    int frameCount = 0;
-    float fps = 0.f;
+            QuadTree tree({ 0, 0, (float)WIN_WIDTH, (float)WIN_HEIGHT }, NODE_CAPACITY);
 
-    std::vector<std::thread> thread_collide_tests;
-    unsigned int n_thread_collide_test = std::max(1u, std::thread::hardware_concurrency() / 2);
-    thread_collide_tests.reserve(n_thread_collide_test);
+            sf::Clock clock;
+            sf::Clock fpsClock;
+            sf::Clock test_timer;
+            int frameCount = 0;
+            float fps = 0.f;
 
-    std::vector<std::thread> thread_renderer;
-    unsigned int n_thread_renderer = std::max(1u, std::thread::hardware_concurrency() / 2);
-    thread_renderer.reserve(n_thread_renderer);
+            std::vector<std::thread> thread_collide_tests;
+            unsigned int n_thread_collide_test = n_thread;
+            thread_collide_tests.reserve(n_thread_collide_test);
 
-    auto worker_collide_test = [&](std::atomic<size_t>& nextIndex) {
-        while (true) {
-            size_t i = nextIndex.fetch_add(1, std::memory_order_relaxed);
-            if (i >= allObjects.size()) break;
+            double totalFrame = 0.f;
+            int totalCount = 0;
 
-            GameObject& objA = allObjects[i];
-            auto candidates = tree.query(objA.bounds);
+            auto worker_collide_test = [&](std::atomic<size_t>& nextIndex) {
+                while (true) {
+                    size_t i = nextIndex.fetch_add(1, std::memory_order_relaxed);
+                    if (i >= allObjects.size()) break;
 
-            for (GameObject* objB : candidates) {
-                if (objA.id >= objB->id) continue;
-                if (checkCollision(objA, *objB)) {
-                    collided[objA.id].store(true, std::memory_order_relaxed);
-                    collided[objB->id].store(true, std::memory_order_relaxed);
+                    GameObject& objA = allObjects[i];
+                    auto candidates = tree.query(objA.bounds);
+
+                    for (GameObject* objB : candidates) {
+                        if (objA.id >= objB->id) continue;
+                        if (checkCollision(objA, *objB)) {
+                            collided[objA.id].store(true, std::memory_order_relaxed);
+                            collided[objB->id].store(true, std::memory_order_relaxed);
+                        }
+                    }
                 }
+            };
+
+            while (window.isOpen() && test_timer.getElapsedTime().asSeconds() < 10.0f) {
+                float deltaTime = clock.restart().asSeconds();
+                frameCount++;
+                totalFrame += deltaTime;
+                totalCount++;
+
+                if (fpsClock.getElapsedTime().asSeconds() >= 1.f) {
+                    fps = frameCount / fpsClock.getElapsedTime().asSeconds();
+                    frameCount = 0;
+                    fpsClock.restart();
+
+                    std::ostringstream ss;
+                    ss << "FPS: " << std::fixed << std::setprecision(1) << fps;
+                    fpsText.setString(ss.str());
+                }
+
+                window.handleEvents(
+                    [&window](const sf::Event::Closed&) { window.close(); }
+                );
+
+                // 충돌 플래그 초기화
+                for (auto& c : collided) {
+                    c.store(false, std::memory_order_relaxed);
+                }
+
+                // 업데이트
+                for (GameObject& obj : allObjects) {
+                    obj.update(deltaTime, (float)WIN_WIDTH, (float)WIN_HEIGHT);
+                    obj.shape.setFillColor(sf::Color::White);
+                    obj.shape.setOutlineThickness(0);
+                }
+
+                // 쿼드트리 빌드
+                tree.clear();
+                for (GameObject& obj : allObjects) {
+                    tree.insert(&obj);
+                }
+
+                // 병렬 충돌 검사
+                std::atomic<size_t> nextIndex{0};
+
+                for (unsigned int t = 0; t < n_thread_collide_test; ++t) {
+                    thread_collide_tests.emplace_back(worker_collide_test, std::ref(nextIndex));
+                }
+                for (auto& th : thread_collide_tests) {
+                    th.join();
+                }
+
+
+                for (int i = 0; i < NUM_OBJECTS; ++i) {
+                    if (collided[i].load(std::memory_order_relaxed)) {
+                        allObjects[i].shape.setFillColor(sf::Color::Red);
+                        allObjects[i].shape.setOutlineThickness(1.5f);
+                        allObjects[i].shape.setOutlineColor(sf::Color::Yellow);
+                    }
+                }
+
+                window.clear(sf::Color::Black);
+                tree.draw(window);
+                for (const GameObject& obj : allObjects) {
+                    window.draw(obj.shape);
+                }
+                window.draw(fpsText);
+                window.display();
+
+                thread_collide_tests.clear();
             }
+            double avg = totalFrame / totalCount;
+            double avgFPS = 1.0 / avg;
+            file << "n_thread = " << n_thread_collide_test
+              << ", avg FPS = " << avgFPS
+              << " (" << avg * 1000.0 << " ms/frame)" << std::endl;
         }
-    };
-
-    while (window.isOpen()) {
-        float deltaTime = clock.restart().asSeconds();
-        frameCount++;
-
-        if (fpsClock.getElapsedTime().asSeconds() >= 1.f) {
-            fps = frameCount / fpsClock.getElapsedTime().asSeconds();
-            frameCount = 0;
-            fpsClock.restart();
-
-            std::ostringstream ss;
-            ss << "FPS: " << std::fixed << std::setprecision(1) << fps;
-            fpsText.setString(ss.str());
-        }
-
-        window.handleEvents(
-            [&window](const sf::Event::Closed&) { window.close(); }
-        );
-
-        // 충돌 플래그 초기화
-        for (auto& c : collided) {
-            c.store(false, std::memory_order_relaxed);
-        }
-
-        // 업데이트
-        for (GameObject& obj : allObjects) {
-            obj.update(deltaTime, (float)WIN_WIDTH, (float)WIN_HEIGHT);
-            obj.shape.setFillColor(sf::Color::White);
-            obj.shape.setOutlineThickness(0);
-        }
-
-        // 쿼드트리 빌드
-        tree.clear();
-        for (GameObject& obj : allObjects) {
-            tree.insert(&obj);
-        }
-
-        // 병렬 충돌 검사
-        std::atomic<size_t> nextIndex{0};
-
-        for (unsigned int t = 0; t < n_thread_collide_test; ++t) {
-            thread_collide_tests.emplace_back(worker_collide_test, std::ref(nextIndex));
-        }
-        for (auto& th : thread_collide_tests) {
-            th.join();
-        }
-
-
-        for (int i = 0; i < NUM_OBJECTS; ++i) {
-            if (collided[i].load(std::memory_order_relaxed)) {
-                allObjects[i].shape.setFillColor(sf::Color::Red);
-                allObjects[i].shape.setOutlineThickness(1.5f);
-                allObjects[i].shape.setOutlineColor(sf::Color::Yellow);
-            }
-        }
-
-        window.clear(sf::Color::Black);
-        tree.draw(window);
-        for (const GameObject& obj : allObjects) {
-            window.draw(obj.shape);
-        }
-        window.draw(fpsText);
-        window.display();
-
-        thread_collide_tests.clear();
+        file.close();
     }
-
     return 0;
 }
