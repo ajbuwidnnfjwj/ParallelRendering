@@ -9,10 +9,13 @@
 #include <sstream>
 #include <iomanip>
 #include <mutex>
+#include <string>
 
 #include "SFML/Graphics.hpp"
 
+// =========================================================
 // 1. 기본 구조체
+// =========================================================
 struct Point {
     float x, y;
 };
@@ -68,7 +71,9 @@ struct GameObject {
     }
 };
 
+// =========================================================
 // 2. 쿼드트리
+// =========================================================
 class QuadTree {
 private:
     struct Node {
@@ -181,7 +186,10 @@ public:
     }
 };
 
+// =========================================================
 // 3. 유틸리티 및 전역 설정
+// =========================================================
+
 bool checkCollision(const GameObject& go1, const GameObject& go2) {
     return go1.bounds.intersects(go2.bounds);
 }
@@ -203,24 +211,24 @@ enum class SyncMode {
     LockFree       // [3] 락 프리 (Atomic)
 };
 
-// [강제 부하] 성능 차이 체감을 위해 연산량을 늘림 (충돌 시 연산량이 많을 경우)
+// [강제 부하] 성능 차이 체감을 위해 연산량을 늘림
 void heavy_physics_simulation() {
     volatile int dummy = 0;
-    // 이 반복 횟수가 높을수록 싱글 스레드와 멀티 스레드의 차이,
-    // 락 유무에 따른 차이가 극명해짐
     for (int k = 0; k < 30000; ++k) {
         dummy += k;
     }
 }
 
+// =========================================================
 // 4. 메인 함수
+// =========================================================
 int main() {
     const int WIN_WIDTH = 1800;
     const int WIN_HEIGHT = 1200;
-    const int NUM_OBJECTS = 10000;
+    const int NUM_OBJECTS = 5000;
     const int NODE_CAPACITY = 4;
 
-    sf::RenderWindow window(sf::VideoMode({ (unsigned int)WIN_WIDTH, (unsigned int)WIN_HEIGHT }), "Performance Comparison");
+    sf::RenderWindow window(sf::VideoMode({ (unsigned int)WIN_WIDTH, (unsigned int)WIN_HEIGHT }), "Thread Count Control");
     window.setFramerateLimit(60);
 
     sf::Font font("ARIAL.TTF");
@@ -231,17 +239,17 @@ int main() {
 
     std::vector<std::atomic_bool> collided(NUM_OBJECTS);
 
-    // 전역 락
+    // 모드 1용: 전역 락
     std::mutex globalMutex;
 
-    // 객체별 락
+    // 모드 2용: 객체별 락
     std::vector<std::unique_ptr<std::mutex>> objectMutexes;
     objectMutexes.reserve(NUM_OBJECTS);
     for (int i = 0; i < NUM_OBJECTS; ++i) {
         objectMutexes.push_back(std::make_unique<std::mutex>());
     }
 
-    // Lock Free
+    // 기본 모드: Lock Free
     SyncMode currentMode = SyncMode::LockFree;
 
     std::mt19937 rng(static_cast<unsigned int>(
@@ -266,12 +274,15 @@ int main() {
     int frameCount = 0;
     float fps = 0.f;
 
-    // 스레드 풀
-    std::vector<std::thread> thread_collide_tests;
-    unsigned int n_thread_collide_test = std::max(1u, std::thread::hardware_concurrency() - 1); // 메인 제외
-    thread_collide_tests.reserve(n_thread_collide_test);
+    // [스레드 개수 제어 변수]
+    // 기본값: (논리 코어 수 - 1) 또는 최소 1개
+    unsigned int hardware_cores = std::thread::hardware_concurrency();
+    unsigned int currentNumThreads = std::max(1u, hardware_cores - 1);
 
-    // 워커 스레드
+    std::vector<std::thread> thread_collide_tests;
+    thread_collide_tests.reserve(128); // 넉넉하게 예약
+
+    // 워커 스레드 함수
     auto worker_collide_test = [&](std::atomic<size_t>& nextIndex) {
         while (true) {
             size_t i = nextIndex.fetch_add(1, std::memory_order_relaxed);
@@ -303,8 +314,7 @@ int main() {
                         objectMutexes[first]->unlock();
                     }
                     else {
-                        // [Mode 3] Lock Free (Atomic)
-                        // 락이 없지만 안전한(Safe) 방식
+                        // Lock Free
                         heavy_physics_simulation();
                         collided[objA.id].store(true, std::memory_order_relaxed);
                         collided[objB->id].store(true, std::memory_order_relaxed);
@@ -326,18 +336,20 @@ int main() {
 
         std::string modeStr;
         switch (currentMode) {
-        case SyncMode::SingleThread:  modeStr = "[0] Single Thread (Slowest)"; break;
-        case SyncMode::CoarseGrained: modeStr = "[1] Coarse Grained (Global Lock)"; break;
-        case SyncMode::FineGrained:   modeStr = "[2] Fine Grained (Object Lock)"; break;
-        case SyncMode::LockFree:      modeStr = "[3] Lock Free (Fastest)"; break;
+        case SyncMode::SingleThread:  modeStr = "[0] Single Thread"; break;
+        case SyncMode::CoarseGrained: modeStr = "[1] Coarse Grained"; break;
+        case SyncMode::FineGrained:   modeStr = "[2] Fine Grained"; break;
+        case SyncMode::LockFree:      modeStr = "[3] Lock Free"; break;
         }
 
         std::ostringstream ss;
         ss << "FPS: " << std::fixed << std::setprecision(1) << fps << "\n"
             << "Mode: " << modeStr << "\n"
-            << "Press [0], [1], [2], [3] to switch modes";
+            << "Threads: " << (currentMode == SyncMode::SingleThread ? 1 : currentNumThreads) << " (Workers) + 1 (Main)\n"
+            << "[0~3]: Mode | [Up/Down]: Threads";
         fpsText.setString(ss.str());
 
+        // 이벤트 처리 (SFML 3.0 호환)
         while (const auto event = window.pollEvent()) {
             if (event->is<sf::Event::Closed>()) {
                 window.close();
@@ -347,6 +359,16 @@ int main() {
                 else if (keyEvent->code == sf::Keyboard::Key::Num1) currentMode = SyncMode::CoarseGrained;
                 else if (keyEvent->code == sf::Keyboard::Key::Num2) currentMode = SyncMode::FineGrained;
                 else if (keyEvent->code == sf::Keyboard::Key::Num3) currentMode = SyncMode::LockFree;
+
+                // 스레드 개수 조절 (Up/Down)
+                else if (keyEvent->code == sf::Keyboard::Key::Up) {
+                    if (currentNumThreads < hardware_cores * 4) // 최대 4배수까지만 허용
+                        currentNumThreads++;
+                }
+                else if (keyEvent->code == sf::Keyboard::Key::Down) {
+                    if (currentNumThreads > 1)
+                        currentNumThreads--;
+                }
             }
         }
 
@@ -381,11 +403,15 @@ int main() {
             }
         }
         else {
-            // [1, 2, 3번] 병렬 처리
+            // [1, 2, 3번] 병렬 처리 - 사용자가 설정한 currentNumThreads 만큼 생성
             std::atomic<size_t> nextIndex{ 0 };
-            for (unsigned int t = 0; t < n_thread_collide_test; ++t) {
+
+            // 스레드 생성 루프
+            for (unsigned int t = 0; t < currentNumThreads; ++t) {
                 thread_collide_tests.emplace_back(worker_collide_test, std::ref(nextIndex));
             }
+
+            // 대기
             for (auto& th : thread_collide_tests) {
                 th.join();
             }
